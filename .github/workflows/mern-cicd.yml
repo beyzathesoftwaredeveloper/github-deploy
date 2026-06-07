@@ -32,8 +32,8 @@ jobs:
         run: |
           echo "Repo structure:"
           ls -la
-          echo "devops-solution-final contents:"
-          ls -la devops-solution-final/
+          echo "mern-project contents:"
+          ls -la mern-project/
 
   build-and-push:
     name: Build & Push to ECR
@@ -67,7 +67,7 @@ jobs:
       - name: Build and push server image
         uses: docker/build-push-action@v5
         with:
-          context: devops-solution-final
+          context: .
           file: devops-solution-final/dockerfiles/Dockerfile.server
           push: true
           tags: |
@@ -77,7 +77,7 @@ jobs:
       - name: Build and push client image
         uses: docker/build-push-action@v5
         with:
-          context: devops-solution-final
+          context: .
           file: devops-solution-final/dockerfiles/Dockerfile.client
           push: true
           build-args: |
