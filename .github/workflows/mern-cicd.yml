@@ -28,13 +28,12 @@ jobs:
         with:
           node-version: "18"
 
-      - name: Install client dependencies
-        working-directory: devops-solution-final/mern-project/client
-        run: npm ci || true
-
-      - name: Install server dependencies
-        working-directory: devops-solution-final/mern-project/server
-        run: npm ci || true
+      - name: Verify project structure
+        run: |
+          echo "Repo structure:"
+          ls -la
+          echo "devops-solution-final contents:"
+          ls -la devops-solution-final/
 
   build-and-push:
     name: Build & Push to ECR
