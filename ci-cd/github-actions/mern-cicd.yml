@@ -1,0 +1,201 @@
+name: MERN Stack CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION: eu-west-1           # Değiştirin
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com
+  EKS_CLUSTER_NAME: mern-eks-cluster
+  K8S_NAMESPACE: mern-app
+
+jobs:
+  # ─── 1. Test ──────────────────────────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: mern-project/client/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: mern-project/client
+        run: npm ci
+
+      - name: Run client unit tests
+        working-directory: mern-project/client
+        run: npm test -- --watchAll=false --passWithNoTests
+
+      - name: Install server dependencies
+        working-directory: mern-project/server
+        run: npm ci
+
+      # Lint check
+      - name: Lint check (client)
+        working-directory: mern-project/client
+        run: npx eslint src/ --ext .js,.jsx --max-warnings 0 || true
+
+  # ─── 2. Build & Push Docker Images ───────────────────────────────────────
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      short-sha: ${{ steps.vars.outputs.sha_short }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx (multi-platform & cache)
+        uses: docker/setup-buildx-action@v3
+
+      # Build & Push: Server
+      - name: Build and push server image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: dockerfiles/Dockerfile.server
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/mern-server:${{ steps.vars.outputs.sha_short }}
+            ${{ env.ECR_REGISTRY }}/mern-server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Build & Push: Client
+      - name: Build and push client image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: dockerfiles/Dockerfile.client
+          push: true
+          build-args: |
+            REACT_APP_SERVER_URL=${{ secrets.REACT_APP_SERVER_URL }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/mern-client:${{ steps.vars.outputs.sha_short }}
+            ${{ env.ECR_REGISTRY }}/mern-client:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── 3. Deploy to Kubernetes ──────────────────────────────────────────────
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f kubernetes/mern/00-namespace.yaml
+          kubectl apply -f kubernetes/mern/01-secrets.yaml  || true  # Secrets ayrıca yönetilmeli
+          kubectl apply -f kubernetes/mern/02-mongodb.yaml
+          kubectl apply -f kubernetes/mern/03-server.yaml
+          kubectl apply -f kubernetes/mern/04-client.yaml
+          kubectl apply -f kubernetes/python-etl/cronjob.yaml
+
+      - name: Update server image tag
+        run: |
+          kubectl set image deployment/mern-server \
+            mern-server=${{ env.ECR_REGISTRY }}/mern-server:${{ needs.build-and-push.outputs.short-sha }} \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Update client image tag
+        run: |
+          kubectl set image deployment/mern-client \
+            mern-client=${{ env.ECR_REGISTRY }}/mern-client:${{ needs.build-and-push.outputs.short-sha }} \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/mern-server -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+          kubectl rollout status deployment/mern-client -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+
+      - name: Verify deployment health
+        run: |
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+          kubectl get services -n ${{ env.K8S_NAMESPACE }}
+          kubectl get ingress -n ${{ env.K8S_NAMESPACE }}
+
+      # Rollback on failure
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed! Rolling back..."
+          kubectl rollout undo deployment/mern-server -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout undo deployment/mern-client -n ${{ env.K8S_NAMESPACE }}
+
+  # ─── 4. Notify ────────────────────────────────────────────────────────────
+  notify:
+    name: Notify Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always() && github.ref == 'refs/heads/main'
+    steps:
+      - name: Slack notification
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "${{ needs.deploy.result == 'success' && '✅' || '❌' }} MERN Deployment *${{ needs.deploy.result }}* — `${{ github.repository }}` @ `${{ github.sha }}`",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ needs.deploy.result == 'success' && '✅ Deployment başarılı!' || '❌ Deployment BAŞARISIZ!' }}\n*Repo:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Actor:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

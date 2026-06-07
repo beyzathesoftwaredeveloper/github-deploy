@@ -1,0 +1,21 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mern-app
+  labels:
+    app: mern-stack
+    environment: production
+
+---
+# ConfigMap — non-secret config values
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mern-config
+  namespace: mern-app
+data:
+  MONGO_DB_NAME: "sample_training"
+  SERVER_PORT: "5050"
+  NODE_ENV: "production"

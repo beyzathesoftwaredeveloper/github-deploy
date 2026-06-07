@@ -1,0 +1,146 @@
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# Monitoring: Prometheus ServiceMonitor + CloudWatch Alerts
+# Not: Prometheus Operator kurulumu gerektirir
+# helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+# helm install kube-prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace
+# ──────────────────────────────────────────────────────────────────────────────
+
+# PrometheusRule — kritik alertler
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mern-alerts
+  namespace: mern-app
+  labels:
+    release: kube-prometheus    # Prometheus Operator label selector
+spec:
+  groups:
+    - name: mern-availability
+      interval: 30s
+      rules:
+        # Pod crash alert
+        - alert: MernPodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="mern-app"}[5m]) > 0
+          for: 2m
+          labels:
+            severity: critical
+            team: devops
+          annotations:
+            summary: "Pod {{ $labels.pod }} is crash looping"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been restarting. Check logs: kubectl logs {{ $labels.pod }} -n mern-app"
+
+        # High error rate on backend
+        - alert: MernServerHighErrorRate
+          expr: |
+            rate(http_requests_total{namespace="mern-app", job="mern-server", status=~"5.."}[5m]) /
+            rate(http_requests_total{namespace="mern-app", job="mern-server"}[5m]) > 0.05
+          for: 3m
+          labels:
+            severity: warning
+            team: devops
+          annotations:
+            summary: "High 5xx error rate on mern-server"
+            description: "Error rate is {{ $value | humanizePercentage }} on mern-server"
+
+        # Pod not ready
+        - alert: MernPodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="mern-app", condition="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.pod }} is not ready"
+            description: "Pod {{ $labels.pod }} has been not ready for 5 minutes"
+
+        # ETL CronJob failure
+        - alert: EtlCronJobFailed
+          expr: |
+            kube_job_status_failed{namespace="mern-app", job_name=~"python-etl-.*"} > 0
+          for: 1m
+          labels:
+            severity: warning
+            team: devops
+          annotations:
+            summary: "ETL CronJob failed"
+            description: "Python ETL job {{ $labels.job_name }} has failed. Check: kubectl logs -l job-name={{ $labels.job_name }} -n mern-app"
+
+    - name: mern-resources
+      rules:
+        # High CPU
+        - alert: MernHighCPU
+          expr: |
+            100 * (1 - avg by(pod) (rate(container_cpu_usage_seconds_total{namespace="mern-app", container!=""}[5m])) /
+            avg by(pod) (kube_pod_container_resource_limits{namespace="mern-app", resource="cpu"})) < 20
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} is using >80% CPU limit"
+
+        # High Memory
+        - alert: MernHighMemory
+          expr: |
+            container_memory_usage_bytes{namespace="mern-app", container!=""} /
+            kube_pod_container_resource_limits{namespace="mern-app", resource="memory"} > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} memory usage >85%"
+
+---
+# Alertmanager config — Slack bildirimleri
+# Bu config Prometheus Operator'ın Alertmanager'ına gider
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: mern-alertmanager-config
+  namespace: mern-app
+spec:
+  route:
+    groupBy: ["alertname", "namespace"]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+    receiver: "slack-devops"
+    routes:
+      - matchers:
+          - name: severity
+            value: critical
+        receiver: "slack-devops-critical"
+        repeatInterval: 1h
+
+  receivers:
+    - name: "slack-devops"
+      slackConfigs:
+        - apiURL:
+            name: alertmanager-secrets
+            key: slack-webhook-url
+          channel: "#devops-alerts"
+          iconEmoji: ":warning:"
+          title: "⚠️ [{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}"
+          text: >-
+            {{ range .Alerts }}
+            *Alert:* {{ .Annotations.summary }}
+            *Description:* {{ .Annotations.description }}
+            *Severity:* {{ .Labels.severity }}
+            {{ end }}
+          sendResolved: true
+
+    - name: "slack-devops-critical"
+      slackConfigs:
+        - apiURL:
+            name: alertmanager-secrets
+            key: slack-webhook-url
+          channel: "#devops-critical"
+          iconEmoji: ":red_circle:"
+          title: "🔴 CRITICAL: {{ .GroupLabels.alertname }}"
+          text: >-
+            {{ range .Alerts }}
+            *Alert:* {{ .Annotations.summary }}
+            *Description:* {{ .Annotations.description }}
+            {{ end }}
+          sendResolved: true
