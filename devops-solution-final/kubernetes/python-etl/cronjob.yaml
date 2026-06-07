@@ -1,0 +1,43 @@
+---
+# Python ETL CronJob — Her 1 saatte bir çalışır
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: python-etl-cronjob
+  namespace: mern-app
+  labels:
+    app: python-etl
+spec:
+  # Her saat başı çalışır (cron syntax: dakika saat gün ay haftanın_günü)
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid        # Önceki çalışma bitmeden yeni başlatma
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300     # 5 dakika içinde başlayamazsa skip
+  jobTemplate:
+    spec:
+      backoffLimit: 2              # Hata durumunda 2 kez tekrar dene
+      activeDeadlineSeconds: 3000  # Max 50 dakika çalışsın (timeout)
+      template:
+        metadata:
+          labels:
+            app: python-etl
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: python-etl
+              image: 686519987622.dkr.ecr.eu-central-1.amazonaws.com/python-etl:latest
+              imagePullPolicy: Always
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "200m"
+              env:
+                - name: ETL_LOG_LEVEL
+                  value: "INFO"
+          # Node seçimi — isteğe bağlı
+          # nodeSelector:
+          #   node-role: worker

@@ -1,0 +1,22 @@
+# ─── Python ETL Dockerfile ────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+# Güvenlik: non-root user
+RUN groupadd -r etlgroup && useradd -r -g etlgroup etluser
+
+WORKDIR /app
+
+# Install dependencies
+COPY python-project/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy ETL script
+COPY python-project/ETL.py ./
+
+# Set ownership
+RUN chown -R etluser:etlgroup /app
+
+USER etluser
+
+# Kubernetes CronJob bu container'ı her 1 saatte çalıştıracak
+CMD ["python", "ETL.py"]

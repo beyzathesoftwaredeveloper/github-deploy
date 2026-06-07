@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mern-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-password}
+      MONGO_INITDB_DATABASE: sample_training
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - mern-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: dockerfiles/Dockerfile.server
+    container_name: mern-server
+    restart: unless-stopped
+    environment:
+      ATLAS_URI: mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/sample_training?authSource=admin
+    ports:
+      - "5050:5050"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - mern-network
+
+  client:
+    build:
+      context: .
+      dockerfile: dockerfiles/Dockerfile.client
+      args:
+        REACT_APP_SERVER_URL: http://localhost:5050
+    container_name: mern-client
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - server
+    networks:
+      - mern-network
+
+  etl:
+    build:
+      context: .
+      dockerfile: dockerfiles/Dockerfile.etl
+    container_name: python-etl
+    # Local'de her 1 saatte çalışması için watch modunda bırakıyoruz
+    # Kubernetes'te CronJob olarak çalışacak
+    restart: "no"
+    networks:
+      - mern-network
+
+volumes:
+  mongo_data:
+
+networks:
+  mern-network:
+    driver: bridge
